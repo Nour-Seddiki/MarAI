@@ -1,0 +1,41 @@
+# Rented 24GB GPU (RTX 4090 class, Linux). Sizes are starting points to tune.
+model:
+  policy: Qwen/Qwen3-1.7B-Base
+  reward: Qwen/Qwen3-0.6B-Base
+  load_in_4bit: false
+
+lora: {r: 32, alpha: 64, dropout: 0.05, target_modules: all-linear}
+
+train:
+  max_seq_len: 2048
+  batch_size: 4
+  grad_accum: 4
+  lr: 2.0e-4
+  epochs: 2
+  optim: adamw_torch
+
+data:
+  stage1_examples: 3000
+  stage2_prompts: 2000
+  stage3_prompts: 2000
+
+generation: {backend: vllm, max_new_tokens: 1024}
+
+grpo:
+  steps: 800
+  num_generations: 8
+  max_completion_length: 1024
+  reward_weights: [0.4, 0.1, 0.5]   # correctness, format, constitutional
+  beta: 0.02
+  use_vllm: true
+
+judge:
+  base_url: http://localhost:8000/v1
+  model: judge-7b-instruct
+
+eval:
+  max_new_tokens: 1024
+
+tracking: {report_to: wandb}
+
+hub: {repo: your-hf-user/crllm, private: true}

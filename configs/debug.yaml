@@ -1,0 +1,41 @@
+# Laptop RTX 5050 (8GB, Windows/WDDM). Proves the pipeline end to end on tiny data.
+model:
+  policy: Qwen/Qwen3-0.6B-Base
+  reward: Qwen/Qwen3-0.6B-Base
+  load_in_4bit: true
+
+lora: {r: 16, alpha: 32}
+
+train:
+  max_seq_len: 1024
+  batch_size: 1
+  grad_accum: 16
+  optim: paged_adamw_8bit
+  gradient_checkpointing: true
+
+data:
+  stage1_examples: 200
+  stage2_prompts: 100
+  stage3_prompts: 100
+
+generation: {backend: hf}
+
+grpo:
+  steps: 50
+  num_generations: 4
+  max_completion_length: 384
+  use_vllm: false
+
+judge:
+  base_url: http://localhost:11434/v1
+  model: qwen2.5:7b-instruct
+
+eval:
+  gsm8k_n: 200                # debug only checks the harness runs, not the gate
+
+runtime:
+  keep_awake: true
+  pin_p_cores: true
+  p_core_mask: 0x0FFF
+  above_normal_priority: true
+  cuda_memory_fraction: 0.8

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crllm"
+version = "0.1.0"
+description = "Constitutional reasoning LLM: think-trace SFT, constitutional SFT, reward model, GRPO"
+requires-python = ">=3.10"
+# torch is not listed: install the CUDA build that matches the machine
+# (cu128+ for the RTX 5050 / Blackwell, the pod image's own build on RunPod).
+dependencies = [
+    "pyyaml>=6",
+    "transformers>=4.51",
+    "peft>=0.15",
+    "trl>=0.19",
+    "accelerate>=1.0",
+    "datasets>=3.0",
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+quant = ["bitsandbytes>=0.45"]
+vllm = ["vllm>=0.10"]
+track = ["wandb"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+crllm = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

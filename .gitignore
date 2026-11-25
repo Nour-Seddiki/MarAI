@@ -1,0 +1,18 @@
+# pipeline artifacts (see the data contracts in the build plan)
+data/
+ckpt/
+reports/
+wandb/
+runs/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# exports
+*.gguf

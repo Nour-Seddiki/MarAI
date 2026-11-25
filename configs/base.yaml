@@ -1,0 +1,90 @@
+# Shared defaults for every stage. debug.yaml / full.yaml override only what differs.
+seed: 42
+
+paths:
+  data_dir: data
+  ckpt_dir: ckpt
+  reports_dir: reports
+  constitution: configs/constitution.yaml
+
+model:
+  policy: Qwen/Qwen3-0.6B-Base
+  reward: Qwen/Qwen3-0.6B-Base
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  dtype: bfloat16
+  attn_implementation: sdpa
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: all-linear
+  # Qwen3-Base never trained <|im_start|>, <|im_end|>, <think>, </think> (identical rows, tied
+  # lm_head -> identical logits). Init them from their text spelling and train just those rows.
+  init_format_tokens: true
+  train_format_tokens: true
+
+train:
+  max_seq_len: 1024
+  batch_size: 1
+  grad_accum: 16
+  lr: 2.0e-4
+  epochs: 2
+  warmup_ratio: 0.03
+  optim: paged_adamw_8bit
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 100
+
+data:
+  stage1_examples: 200
+  stage2_prompts: 100
+  stage3_prompts: 100
+  stage3_k: 4
+  stage3_min_rank_gap: 1      # 1 keeps all 6 pairs; rank_gap also goes to RewardTrainer as margin
+  rm_holdout_frac: 0.1        # split by prompt, never by pair
+  eval_holdout_frac: 0.1
+
+generation:
+  backend: hf                 # hf | vllm
+  temperature: 0.9
+  top_p: 0.95
+  max_new_tokens: 768
+
+grpo:
+  steps: 50
+  num_generations: 4
+  max_completion_length: 384
+  reward_weights: [0.4, 0.1, 0.5]   # correctness, format, constitutional
+  beta: 0.02
+  use_vllm: false
+  temperature: 0.9
+
+judge:
+  base_url: http://localhost:11434/v1
+  model: qwen2.5:7b-instruct
+  api_key_env: JUDGE_API_KEY  # env var name; Ollama ignores the key
+  temperature: 0.0
+  max_tokens: 1024
+  timeout_s: 120
+
+eval:
+  suites: [format, gsm8k, redteam, overrefusal, honesty]
+  max_new_tokens: 768
+  gsm8k_n: 1319               # full test set: a 500-item subset has ~2.2 pt standard error
+
+tracking:
+  report_to: none             # none | wandb | tensorboard
+  project: crllm
+
+hub:
+  repo: null
+  private: true
+
+runtime:
+  keep_awake: false           # Windows: hold off Modern Standby while a run is alive
+  pin_p_cores: false          # Windows: restrict the process to these logical CPUs
+  p_core_mask: 0x0FFF
+  above_normal_priority: false
+  cuda_memory_fraction: null  # e.g. 0.8 on WDDM so the cache can't spill into shared RAM
