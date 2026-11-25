@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "crllm"
 version = "0.1.0"
 description = "Constitutional reasoning LLM: think-trace SFT, constitutional SFT, reward model, GRPO"
+readme = "README.md"
 requires-python = ">=3.10"
 # torch is not listed: install the CUDA build that matches the machine
 # (cu128+ for the RTX 5050 / Blackwell, the pod image's own build on RunPod).
