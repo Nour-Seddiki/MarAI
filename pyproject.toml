@@ -17,7 +17,10 @@ dependencies = [
     "trl>=0.19",
     "accelerate>=1.0",
     "datasets>=3.0",
-    "openai>=1.40",
+    "httpx>=0.27",      # judge client (OpenAI-compatible endpoints)
+    "requests>=2.31",   # eval data download
+    "pandas>=2.0",
+    "pyarrow>=14",
 ]
 
 [project.optional-dependencies]

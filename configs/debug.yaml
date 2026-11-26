@@ -18,7 +18,10 @@ data:
   stage2_prompts: 100
   stage3_prompts: 100
 
-generation: {backend: hf}
+# scripts/bench_generate.py, 32 prompts x 768 tokens: batch 16 dynamic = 2.53 s/prompt, 4.9 GB peak.
+# 32 dynamic is 11% faster but sits at the 6.3 GB cap (one long-prompt batch ran at 9.3 s/prompt);
+# static cache is fragmentation-free but ~40% slower without torch.compile (no Triton on Windows).
+generation: {backend: hf, batch_size: 16, cache: dynamic}
 
 grpo:
   steps: 50
@@ -27,8 +30,10 @@ grpo:
   use_vllm: false
 
 judge:
-  base_url: http://localhost:11434/v1
-  model: qwen2.5:7b-instruct
+  base_url: http://127.0.0.1:11434/v1
+  model: qwen3.5:4b           # the model installed in Ollama on the laptop
+  reasoning_effort: none      # without it Qwen3.5 thinks for 600+ tokens per call
+  concurrency: 1              # Ollama runs one request at a time (OLLAMA_NUM_PARALLEL=1)
 
 eval:
   gsm8k_n: 200                # debug only checks the harness runs, not the gate

@@ -162,17 +162,23 @@ def _dtype(name: str) -> torch.dtype:
     return {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[name]
 
 
-def load_base(cfg: Config, name_or_path: str | None = None, *, for_training: bool = True):
-    """(model, tokenizer) for the policy (or `name_or_path`), 4-bit NF4 or full precision per config."""
+def load_base(
+    cfg: Config, name_or_path: str | None = None, *, for_training: bool = True, load_in_4bit: bool | None = None
+):
+    """(model, tokenizer) for the policy (or `name_or_path`), 4-bit NF4 or full precision.
+
+    `load_in_4bit=None` follows the config; eval passes False so every stage is scored in bf16.
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     name = name_or_path or cfg.model.policy
+    quant = cfg.model.load_in_4bit if load_in_4bit is None else load_in_4bit
     tokenizer = AutoTokenizer.from_pretrained(name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     kwargs = dict(dtype=_dtype(cfg.model.dtype), attn_implementation=cfg.model.attn_implementation)
-    if cfg.model.load_in_4bit:
+    if quant:
         from transformers import BitsAndBytesConfig
 
         kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -186,7 +192,7 @@ def load_base(cfg: Config, name_or_path: str | None = None, *, for_training: boo
         kwargs["device_map"] = {"": 0}
     model = AutoModelForCausalLM.from_pretrained(name, **kwargs)
 
-    if for_training and cfg.model.load_in_4bit:
+    if for_training and quant:
         from peft import prepare_model_for_kbit_training
 
         model = prepare_model_for_kbit_training(

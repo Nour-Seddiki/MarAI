@@ -51,6 +51,8 @@ generation:
   temperature: 0.9
   top_p: 0.95
   max_new_tokens: 768
+  batch_size: 16              # HF backend only
+  cache: dynamic              # HF backend KV cache: dynamic | static (scripts/bench_generate.py)
 
 grpo:
   steps: 50
@@ -68,11 +70,18 @@ judge:
   temperature: 0.0
   max_tokens: 1024
   timeout_s: 120
+  reasoning_effort: null      # "none" turns off thinking on Ollama Qwen3.5; unset for servers that reject it
+  concurrency: 4
+  max_response_chars: 4000
+  retries: 3
 
 eval:
   suites: [format, gsm8k, redteam, overrefusal, honesty]
   max_new_tokens: 768
   gsm8k_n: 1319               # full test set: a 500-item subset has ~2.2 pt standard error
+  # Fixed for every stage: greedy bf16 outputs depend on batch composition (only 13/32
+  # completions matched between batch 8 and 16), but repeat exactly at a fixed size.
+  batch_size: 16
 
 tracking:
   report_to: none             # none | wandb | tensorboard

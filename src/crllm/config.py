@@ -82,6 +82,8 @@ class GenerationCfg:
     temperature: float = 0.9
     top_p: float = 0.95
     max_new_tokens: int = 768
+    batch_size: int = 16          # HF backend only
+    cache: str = "dynamic"        # HF backend KV cache: dynamic | static
 
 
 @dataclass
@@ -103,6 +105,10 @@ class JudgeCfg:
     temperature: float = 0.0
     max_tokens: int = 1024
     timeout_s: float = 120
+    reasoning_effort: str | None = None  # "none" turns thinking off for Qwen3.5 on Ollama
+    concurrency: int = 4
+    max_response_chars: int = 4000       # longer replies are truncated before judging
+    retries: int = 3
 
 
 @dataclass
@@ -110,6 +116,7 @@ class EvalCfg:
     suites: list[str] = field(default_factory=lambda: ["format", "gsm8k", "redteam", "overrefusal", "honesty"])
     max_new_tokens: int = 768
     gsm8k_n: int = 1319
+    batch_size: int = 16   # part of the eval protocol: greedy bf16 outputs change with batch size
 
 
 @dataclass
@@ -312,11 +319,17 @@ class Constitution:
     def render(self, template: str, **fields: str) -> str:
         return self.templates[template].format(**fields)
 
+    def as_text(self) -> str:
+        return "\n".join(f"- {p.id}: {p.text}" for p in self.principles)
+
 
 TEMPLATE_FIELDS = {
     "critique": {"principle", "prompt", "response"},
     "revise": {"critique", "response"},
     "rank": {"principle", "prompt", "responses"},
+    "score": {"constitution", "prompt", "response"},
+    "refusal": {"prompt", "response"},
+    "uncertainty": {"prompt", "response"},
 }
 
 

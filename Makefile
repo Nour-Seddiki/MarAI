@@ -4,7 +4,7 @@ CONFIG ?= debug
 PY ?= python
 CFG = configs/$(CONFIG).yaml
 
-.PHONY: test check think-tokens eval-base stage1 stage2 stage3 stage4 debug full
+.PHONY: test check think-tokens eval-data eval-base stage1 stage2 stage3 stage4 debug full
 
 test:
 	$(PY) -m unittest discover -s tests -v
@@ -16,7 +16,10 @@ check: test
 think-tokens:
 	$(PY) scripts/check_think_tokens.py --config $(CFG)
 
-# ---- targets below are filled in by M2-M6 ----
+# M2: one-off download of the eval suites into data/eval/
+eval-data:
+	$(PY) scripts/download_eval.py --config $(CFG)
+
 eval-base:
 	$(PY) -m crllm.eval.run_eval --config $(CFG) --ckpt base
 
