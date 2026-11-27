@@ -20,8 +20,8 @@ Each stage ends with a LoRA merge into a bf16 checkpoint and an eval run. The ne
 | M1 Format module | done | `format.py` + tests, format-token check and fix (below) |
 | M2 Eval harness + baseline | done | 7 suites, local 9B judge, resumable runs (below) |
 | M3 Stage 1 (debug) | done | math + code `<think>` SFT, `<think>` prefill (below) |
-| M4 Judge + Stage 2 (debug) | next | |
-| M5–M6 Stages 3–4 (debug) | — | |
+| M6 Stage 4 (debug) | trained | GRPO on correctness + format, straight from Stage 1; full eval pending |
+| M4–M5 Judge + Stages 2–3 (debug) | — | constitutional SFT and reward model |
 | M7 Full run on rented GPU | — | |
 | M8 Report, GGUF export | — | |
 
@@ -83,6 +83,27 @@ Debug run (1,950 train / 50 held-out, 2 epochs, 244 steps, 40 min on the RTX 505
 
 Validation loss only goes down, then flattens. Epoch 2's drop in training loss (0.62 → 0.55) is mostly memorization, so 2 epochs is the most this data size supports. `python scripts/show_losses.py ckpt/stage1/checkpoint-*/trainer_state.json` prints the full table.
 
+## Stage 4: GRPO with verifiable rewards (M6, run early)
+
+Stage 4 runs **straight from Stage 1**, before Stages 2–3. The goal is to raise math and code accuracy and fix the `</think>` problem first. The plan's constitutional reward needs the Stage 3 reward model, so for now the rewards are:
+
+| Reward ([`rewards.py`](src/crllm/rewards.py)) | Weight | Score |
+|---|---|---|
+| correctness | 0.7 | math: 1 if the final answer matches the gold (LaTeX-normalized); code: share of unit-test asserts that pass; chat: none |
+| format | 0.3 | 1 if the turn is well-formed **and** actually ended on `<|im_end|>` (checked on token ids, since TRL strips special tokens from the text) |
+
+Both rewards are **strict**: they read only what comes after `</think>`, so an unclosed thinking block earns nothing. A reply cut off at `max_completion_length` (512 in debug) also earns nothing, which pushes the model to finish its reasoning sooner.
+
+```bash
+python -m crllm.data.build_rl --config debug     # -> data/rl_prompts.jsonl
+python -m crllm.train.grpo --config debug        # -> ckpt/stage4 (LoRA on stage1-merged)
+python scripts/merge_adapter.py --config debug --stage 4    # -> ckpt/final
+```
+
+**Prompts** ([`build_rl.py`](src/crllm/data/build_rl.py)): 45% math (OpenMathInstruct-2, half GSM8K-style, half MATH-style), 35% code (OpenCodeInstruct with ~10 asserts each), 20% chat (Alpaca-cleaned, format reward only). Eval and Stage 1 questions are excluded. A code task is kept only if its reference solution passes all of its own asserts through our runner; 11 of 361 failed.
+
+**Trainer** ([`grpo.py`](src/crllm/train/grpo.py)): TRL `GRPOTrainer`, a fresh LoRA, 4 generations per prompt, β = 0.02 (KL to the Stage 1 model), lr 2e-5. The format-token rows aren't trained again; Stage 1 already trained them.
+
 ## Evaluation
 
 One command scores any checkpoint on fixed prompts with greedy decoding:
@@ -120,17 +141,19 @@ The build scripts drop any training prompt whose `key` (normalized-text hash) ap
 
 Both models are scored with the same protocol: bf16, greedy, `<think>` prefill, 1,024 new tokens, batch 16, judge `qwen3.5:9b`. Errors are ± one standard error. `python scripts/summarize_report.py reports/debug/base.json reports/debug/stage1.json` prints this table.
 
-| Suite | Base | Stage 1 | Note |
-|---|---|---|---|
-| format (well-formed) | 0.0% | **49.7% ± 2.5** | gate ≥ 95%: **not met** |
-| GSM8K (500), strict | 0.0% | **57.2% ± 2.2** | |
-| MATH-500, strict | 0.0% | **35.0% ± 2.1** | level 1: 81% … level 5: 9% |
-| MBPP pass@1 | 0.8% | **32.7% ± 2.9** | |
-| red-team safety (1–5) | 3.51 ± 0.05 | 3.40 ± 0.06 | Stage 1 doesn't train safety; Stage 2 does |
-| over-refusal (lower is better) | 24.4% | **0.8%** | |
-| honesty (flags uncertainty) | 3.7% | 8.3% | |
+| Suite | Base, strict | Base, lenient | Stage 1, strict | Stage 1, lenient | Note |
+|---|---|---|---|---|---|
+| format (well-formed) | 0.0% | | **49.7% ± 2.5** | | gate ≥ 95%: **not met** |
+| GSM8K (500) | 0.0% | 21.2% ± 1.8 | **57.2% ± 2.2** | 58.8% ± 2.2 | |
+| MATH-500 | 0.0% | 22.2% ± 1.9 | **35.0% ± 2.1** | 36.2% ± 2.1 | level 1: 81% … level 5: 9% |
+| MBPP pass@1 | 0.0% | 0.8% ± 0.5 | **11.7% ± 2.0** | 32.7% ± 2.9 | most working code sits inside an unclosed `<think>` |
+| red-team safety (1–5) | 3.51 ± 0.05 | | 3.46 ± 0.06 | | Stage 1 doesn't train safety; Stage 2 does |
+| over-refusal (lower is better) | 24.4% | | **0.8%** | | |
+| honesty (flags uncertainty) | 3.7% | | 8.3% | | |
 
-The **strict** scores read the answer after `</think>`, which is what a user sees. With the prefill, the base model never closes `</think>`, so it scores 0 on strict math even though it can solve problems: without the prefill it got 41.5% on GSM8K. `score_gsm8k` / `score_math500` / `score_mbpp` now also report a **lenient** accuracy that accepts an answer found anywhere in the reply, so reasoning ability and format are measured separately.
+**Strict** scores read the answer after `</think>`, which is what a user sees. **Lenient** scores accept an answer found anywhere in the reply, so reasoning ability and format are measured separately. With the prefill, the base model never closes `</think>`, so it gets 0 on strict, and the unfamiliar `<think>` token also lowers its lenient score: without the prefill it got 41.5% on GSM8K. Even on the lenient measure, Stage 1 gains **+38 points on GSM8K, +14 on MATH-500 and +32 on MBPP**, so the training improved the reasoning and not just the format. On code the format costs the most: the model writes passing code 32.7% of the time, but only 11.7% after `</think>`.
+
+The judge varies a little between runs. Re-judging the same Stage 1 completions moved red-team from 3.40 to 3.46, about one standard error.
 
 Where Stage 1 falls short of the format gate:
 

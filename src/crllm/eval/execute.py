@@ -54,3 +54,41 @@ def run_many(jobs: list[tuple[str | None, list[str], list[str]]], workers: int =
              timeout_s: float = 10.0) -> list[ExecResult]:
     with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(lambda j: run_tests(j[0], j[1], j[2], timeout_s), jobs))
+
+
+_COUNTER = """
+import json as _json
+_tests = _json.loads({tests!r})
+_passed = 0
+for _src in _tests:
+    try:
+        exec(_src, globals())
+        _passed += 1
+    except BaseException:
+        pass
+print("__CRLLM_PASSED__", _passed, len(_tests))
+"""
+
+
+def fraction_passed(code: str | None, tests: list[str], imports: list[str] | None = None,
+                    timeout_s: float = 5.0) -> float:
+    """Share of asserts that pass (each runs independently), for partial-credit rewards. 0.0 on any failure."""
+    if not code or not tests:
+        return 0.0
+    import json
+
+    program = "\n".join([*(imports or []), code, _COUNTER.format(tests=json.dumps(tests))])
+    with tempfile.TemporaryDirectory(prefix="crllm_exec_") as d:
+        path = os.path.join(d, "prog.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(program)
+        try:
+            p = subprocess.run([sys.executable, "-I", path], cwd=d, env=_minimal_env(), capture_output=True,
+                               text=True, timeout=timeout_s, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return 0.0
+    for line in reversed(p.stdout.splitlines()):
+        if line.startswith("__CRLLM_PASSED__"):
+            _, k, n = line.split()
+            return int(k) / max(1, int(n))
+    return 0.0  # the solution itself crashed before the tests ran

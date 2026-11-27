@@ -40,7 +40,7 @@ class ConfigTest(unittest.TestCase):
     def test_reward_weights_match_reward_funcs(self):
         for name in ("debug", "full"):
             cfg = load_config(name)
-            self.assertEqual(len(cfg.grpo.reward_weights), 3)  # correctness, format, constitutional
+            self.assertEqual(len(cfg.grpo.reward_weights), 2)  # correctness, format (no Stage 3 RM yet)
             self.assertAlmostEqual(sum(cfg.grpo.reward_weights), 1.0)
 
     def test_cli_overrides(self):

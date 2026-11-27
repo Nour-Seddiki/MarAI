@@ -75,8 +75,18 @@ class Stage1MixCfg:
 
 
 @dataclass
+class Stage4MixCfg:
+    """Shares of Stage 4 (GRPO) prompts; see crllm/data/build_rl.py."""
+    math: float = 0.45   # OpenMathInstruct-2 with expected answers
+    code: float = 0.35   # OpenCodeInstruct with unit-test asserts
+    chat: float = 0.20   # Alpaca-cleaned; format reward only
+
+
+@dataclass
 class DataCfg:
     stage1_mix: Stage1MixCfg = field(default_factory=Stage1MixCfg)
+    stage4_mix: Stage4MixCfg = field(default_factory=Stage4MixCfg)
+    stage4_prompts: int = 1000
     teacher_max_tokens: int = 256
     stage1_examples: int = 200
     stage2_prompts: int = 100
@@ -102,10 +112,16 @@ class GRPOCfg:
     steps: int = 50
     num_generations: int = 4
     max_completion_length: int = 384
-    reward_weights: list[float] = field(default_factory=lambda: [0.4, 0.1, 0.5])
+    max_prompt_length: int = 512
+    reward_weights: list[float] = field(default_factory=lambda: [0.7, 0.3])  # correctness, format
     beta: float = 0.02
     use_vllm: bool = False
     temperature: float = 0.9
+    lr: float = 2.0e-5
+    batch_size: int = 8          # completions per device step (= prompts x num_generations)
+    grad_accum: int = 2
+    logging_steps: int = 1
+    save_steps: int = 25
 
 
 @dataclass

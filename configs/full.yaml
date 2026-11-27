@@ -25,7 +25,7 @@ grpo:
   steps: 800
   num_generations: 8
   max_completion_length: 1024
-  reward_weights: [0.4, 0.1, 0.5]   # correctness, format, constitutional
+  reward_weights: [0.7, 0.3]   # correctness, format (add constitutional once Stage 3 exists)
   beta: 0.02
   use_vllm: true
 

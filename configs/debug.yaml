@@ -24,9 +24,11 @@ data:
 generation: {backend: hf, batch_size: 16, cache: dynamic}
 
 grpo:
-  steps: 50
+  steps: 100                  # ~80 s/step on the RTX 5050 (4 prompts x 4 generations): ~2.2 h
   num_generations: 4
-  max_completion_length: 384
+  # Stage 1 math replies average ~450-550 tokens; longer ones get truncated, which scores 0 on
+  # both rewards, so this also pushes the model to close </think> sooner.
+  max_completion_length: 512
   use_vllm: false
 
 judge:

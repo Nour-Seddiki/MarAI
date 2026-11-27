@@ -10,6 +10,7 @@ directory gets the tokenizer and a run.json (config, seed, git hash, source adap
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 
 import torch
@@ -37,6 +38,9 @@ def main() -> None:
     ck = cfg.path("ckpt_dir")
     adapter = ck / f"stage{args.stage}"
     base = cfg.model.policy if STAGE_BASE[args.stage] is None else str(ck / STAGE_BASE[args.stage])
+    run = adapter / "run.json"
+    if run.exists():  # the trainer records the base it actually started from (Stage 4 may skip Stage 2)
+        base = json.loads(run.read_text(encoding="utf-8")).get("base") or base
     out = ck / STAGE_OUT[args.stage]
     if not (adapter / "adapter_config.json").exists():
         raise SystemExit(f"no adapter at {adapter}")
