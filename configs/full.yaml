@@ -15,7 +15,7 @@ train:
   optim: adamw_torch
 
 data:
-  stage1_examples: 3000
+  stage1_examples: 20000
   stage2_prompts: 2000
   stage3_prompts: 2000
 
@@ -34,7 +34,7 @@ judge:
   model: judge-7b-instruct
 
 eval:
-  max_new_tokens: 1024
+  max_new_tokens: 2048        # = train.max_seq_len
 
 tracking: {report_to: wandb}
 

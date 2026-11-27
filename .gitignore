@@ -1,9 +1,10 @@
-# pipeline artifacts (see the data contracts in the build plan)
-data/
-ckpt/
-reports/
-wandb/
-runs/
+# pipeline artifacts (see the data contracts in the build plan) - anchored to the repo root,
+# so the src/crllm/data/ package is NOT ignored
+/data/
+/ckpt/
+/reports/
+/wandb/
+/runs/
 
 # python
 __pycache__/

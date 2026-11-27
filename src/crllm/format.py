@@ -1,8 +1,16 @@
 """Prompt template and <think> wrap / parse. The single source of truth for text format.
 
-    prompt      = build_prompt(...)  -> ChatML string ending in "<|im_start|>assistant\\n"
-    completion  = wrap(reasoning, answer) -> "<think>{reasoning}</think>\\n{answer}<|im_end|>"
-    parse(text) -> Parsed(well_formed, reasoning, answer, error)
+    prompt      = build_prompt(...)        -> ChatML ending in "<|im_start|>assistant\\n<think>"
+    turn        = wrap(reasoning, answer)  -> "<think>{reasoning}</think>\\n{answer}<|im_end|>"
+    completion  = to_completion(turn)      -> "{reasoning}</think>\\n{answer}<|im_end|>"
+    parse(turn) -> Parsed(well_formed, reasoning, answer, error)
+
+The prompt is PREFILLED with <think> (like DeepSeek-R1's template): the model only writes
+the reasoning, </think> and the answer. Without the prefill, Stage 1 opened with <think>
+on 100% of chat and code prompts but only 60-70% of math ones, where Qwen3-Base's
+pretraining habit ("To solve...") won. Training targets and generations are completions;
+the generator puts the prefill back (from_completion) so everything downstream - parse,
+eval scorers, samples files, rewards - sees and checks the full assistant turn.
 
 Every stage (SFT data, sampling, rewards, eval) goes through these functions so the
 format cannot drift between stages. Gold answers for verifiable tasks are stored
@@ -28,6 +36,8 @@ DEFAULT_SYSTEM = (
     "First think through the request inside <think>...</think>, then give your answer."
 )
 
+PREFILL = THINK_OPEN  # what build_prompt puts after the assistant header
+
 _CHAT_TOKENS = (IM_START, IM_END, EOT)
 _ROLES = ("system", "user", "assistant")
 
@@ -52,12 +62,13 @@ def _turn(role: str, content: str) -> str:
 def build_prompt(
     user: str | Iterable[Mapping[str, str]],
     system: str | None = DEFAULT_SYSTEM,
+    prefill: bool = True,
 ) -> str:
-    """ChatML prompt up to and including the assistant header.
+    """ChatML prompt up to and including the assistant header, then the <think> prefill.
 
     `user` is either the user message, or a list of {"role", "content"} messages
     ending with a user turn (earlier assistant turns hold the answer only, no <think>).
-    `system=None` omits the system turn.
+    `system=None` omits the system turn; `prefill=False` stops after the assistant header.
     """
     if isinstance(user, str):
         messages = [{"role": "user", "content": user}]
@@ -82,7 +93,7 @@ def build_prompt(
         if role == "assistant" and (THINK_OPEN in content or THINK_CLOSE in content):
             raise ValueError(f"message {i}: earlier assistant turns must not contain <think>")
         parts.append(_turn(role, content))
-    parts.append(f"{IM_START}assistant\n")
+    parts.append(f"{IM_START}assistant\n" + (PREFILL if prefill else ""))
     return "".join(parts)
 
 
@@ -95,8 +106,24 @@ def prompt_key(text: str) -> str:
 # ---------------------------------------------------------------- completions
 
 
+def is_prefilled(prompt: str) -> bool:
+    return prompt.endswith(PREFILL)
+
+
+def to_completion(turn: str) -> str:
+    """Full assistant turn (from wrap) -> what the model writes after a prefilled prompt."""
+    if not turn.startswith(PREFILL):
+        raise ValueError(f"expected a turn starting with {PREFILL!r}: {turn[:40]!r}")
+    return turn[len(PREFILL):]
+
+
+def from_completion(prompt: str, completion: str) -> str:
+    """What the model wrote -> the full assistant turn, restoring the prefill if the prompt had it."""
+    return PREFILL + completion if is_prefilled(prompt) else completion
+
+
 def wrap(reasoning: str, answer: str, *, end: bool = True) -> str:
-    """The only way a training completion is written."""
+    """The only way an assistant turn is written (training targets use to_completion of it)."""
     reasoning, answer = reasoning.strip(), answer.strip()
     if not reasoning:
         raise ValueError("reasoning is empty")
@@ -234,6 +261,66 @@ def _last_boxed(text: str) -> str | None:
         out.append(c)
         i += 1
     return None  # unbalanced
+
+
+def last_boxed(text: str) -> str | None:
+    """Content of the last balanced \\boxed{...} (or \\fbox{...}), or None."""
+    return _last_boxed(text.replace("\\fbox{", "\\boxed{")) if text else None
+
+
+_TEXT_CMD = re.compile(r"\\(?:text|textbf|mathrm|mbox)\{([^{}]*)\}")
+
+
+def normalize_math_answer(s: str | None) -> str | None:
+    """Canonical string for a LaTeX final answer (MATH-style), for exact-match comparison.
+
+    Strips $, spacing commands, \\left/\\right, degree marks, \\text{} wrappers, a leading
+    "x =", and trailing periods; dfrac/tfrac -> frac; plain numbers go through normalize_number.
+    """
+    if s is None:
+        return None
+    s = s.strip().strip("$").strip()
+    s = _TEXT_CMD.sub(r"\1", s)
+    for a, b in (("\\left", ""), ("\\right", ""), ("\\!", ""), ("\\,", ""), ("\\;", ""), ("\\ ", ""),
+                 ("\\dfrac", "\\frac"), ("\\tfrac", "\\frac"), ("^\\circ", ""), ("^{\\circ}", ""),
+                 ("\\%", ""), ("%", ""), ("\\$", "")):
+        s = s.replace(a, b)
+    s = re.sub(r"^[a-zA-Z]\s*=\s*", "", s)          # "x = 5" -> "5"
+    s = re.sub(r"\\frac(\d)(\d)", r"\\frac{\1}{\2}", s)  # \frac12 -> \frac{1}{2}
+    s = s.replace(" ", "").rstrip(".")
+    m = re.fullmatch(r"(-?)\\frac\{(-?\d+)\}\{(-?\d+)\}", s)
+    if m:
+        s = f"{m.group(1)}{m.group(2)}/{m.group(3)}"
+    num = normalize_number(s) if re.fullmatch(r"-?[\d,]*\.?\d+(/\d+)?", s) else None
+    return num if num is not None else s
+
+
+def math_answers_equal(pred: str | None, gold: str | None) -> bool:
+    """Exact match after normalize_math_answer; numbers compare by value (0.5 == 1/2)."""
+    p, g = normalize_math_answer(pred), normalize_math_answer(gold)
+    if p is None or g is None or p == "":
+        return False
+    if p == g:
+        return True
+    try:
+        return Fraction(p) == Fraction(g)
+    except (ValueError, ZeroDivisionError):
+        return False
+
+
+_CODE_BLOCK = re.compile(r"```(?:python|py|Python)?[ \t]*\n(.*?)```", re.S)
+
+
+def extract_code(answer: str | None) -> str | None:
+    """The longest ```python fenced block in an answer (else the whole answer if it looks like code)."""
+    if not answer:
+        return None
+    blocks = _CODE_BLOCK.findall(answer)
+    if blocks:
+        return max(blocks, key=len).strip("\n")
+    if re.search(r"^\s*(def|class|import|from)\s", answer, re.M):
+        return answer.strip()
+    return None
 
 
 def extract_final_answer(answer: str | None) -> str | None:

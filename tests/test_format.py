@@ -5,11 +5,18 @@ from crllm.format import (
     DEFAULT_SYSTEM,
     IM_END,
     build_prompt,
+    extract_code,
     extract_final_answer,
+    from_completion,
+    is_prefilled,
+    last_boxed,
+    math_answers_equal,
+    normalize_math_answer,
     normalize_number,
     parse,
     prompt_key,
     rewrap,
+    to_completion,
     wrap,
 )
 
@@ -21,14 +28,29 @@ class BuildPromptTest(unittest.TestCase):
             p,
             f"<|im_start|>system\n{DEFAULT_SYSTEM}<|im_end|>\n"
             "<|im_start|>user\nWhat is 2+2?<|im_end|>\n"
-            "<|im_start|>assistant\n",
+            "<|im_start|>assistant\n<think>",
         )
 
-    def test_no_system(self):
+    def test_no_system_and_no_prefill(self):
         self.assertEqual(
-            build_prompt("hi", system=None),
+            build_prompt("hi", system=None, prefill=False),
             "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n",
         )
+
+    def test_prefill_roundtrip(self):
+        p = build_prompt("q")
+        self.assertTrue(is_prefilled(p))
+        self.assertFalse(is_prefilled(build_prompt("q", prefill=False)))
+        turn = wrap("r", "a")
+        c = to_completion(turn)
+        self.assertEqual(c, f"r</think>\na{IM_END}")
+        self.assertEqual(from_completion(p, c), turn)
+        self.assertEqual(from_completion(build_prompt("q", prefill=False), turn), turn)
+        self.assertTrue(parse(from_completion(p, c)).well_formed)
+        # the model writing its own <think> after the prefill is two opening tags: malformed
+        self.assertFalse(parse(from_completion(p, turn)).well_formed)
+        with self.assertRaises(ValueError):
+            to_completion("no tag")
 
     def test_multi_turn_and_explicit_system_message(self):
         p = build_prompt(
@@ -43,7 +65,7 @@ class BuildPromptTest(unittest.TestCase):
             p,
             "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\na<|im_end|>\n"
             "<|im_start|>assistant\nb<|im_end|>\n<|im_start|>user\nc<|im_end|>\n"
-            "<|im_start|>assistant\n",
+            "<|im_start|>assistant\n<think>",
         )
         self.assertEqual(p.count("<|im_start|>system"), 1)
 
@@ -183,6 +205,40 @@ class FinalAnswerTest(unittest.TestCase):
         pred = extract_final_answer(parse(wrap("48 + 24 = 72", "She sold 72 clips.")).answer)
         self.assertEqual(gold, "72")
         self.assertEqual(pred, gold)
+
+
+class MathAnswerTest(unittest.TestCase):
+    def test_last_boxed(self):
+        self.assertEqual(last_boxed("a \\boxed{1} then \\boxed{\\frac{\\pi}{2}}"), "\\frac{\\pi}{2}")
+        self.assertEqual(last_boxed("\\fbox{7}"), "7")
+        self.assertIsNone(last_boxed("none"))
+
+    def test_normalize(self):
+        cases = {
+            "\\dfrac{14}{3}": "14/3", "\\frac12": "1/2", "$5$": "5", "x = 3": "3", "10\\%": "10",
+            "90^\\circ": "90", "\\text{(C)}": "(C)", "\\left( 3, \\frac{\\pi}{2} \\right)": "(3,\\frac{\\pi}{2})",
+            "1,000.": "1000", "-\\frac{1}{2}": "-1/2", "\\$18.50": "18.5",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_math_answer(raw), want)
+
+    def test_equal(self):
+        self.assertTrue(math_answers_equal("0.5", "\\frac{1}{2}"))
+        self.assertTrue(math_answers_equal("(3,\\frac{\\pi}{2})", "\\left( 3, \\frac{\\pi}{2} \\right)"))
+        self.assertTrue(math_answers_equal("\\text{Evelyn}", "\\text{Evelyn}"))
+        self.assertFalse(math_answers_equal("3", "4"))
+        self.assertFalse(math_answers_equal(None, "4"))
+        self.assertFalse(math_answers_equal("", ""))
+
+
+class ExtractCodeTest(unittest.TestCase):
+    def test_blocks(self):
+        a = "Here:\n```python\ndef f(x):\n    return x\n```\nand a helper\n```\ndef g():\n    pass\n```"
+        self.assertEqual(extract_code(a), "def f(x):\n    return x")
+        self.assertEqual(extract_code("def h():\n    return 1"), "def h():\n    return 1")
+        self.assertIsNone(extract_code("no code at all"))
+        self.assertIsNone(extract_code(None))
 
 
 if __name__ == "__main__":

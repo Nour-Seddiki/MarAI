@@ -1,8 +1,10 @@
 """Batched sampling from a policy checkpoint: HF generate (any OS) or vLLM (Linux).
 
-Both backends take full ChatML prompt strings (format.build_prompt) and return the raw
-completion text, cut at the first <|im_end|> (kept, so parse() sees a closed turn) or
-<|endoftext|> (dropped). temperature == 0 means greedy.
+Both backends take full ChatML prompt strings (format.build_prompt) and return the
+assistant turn, cut at the first <|im_end|> (kept, so parse() sees a closed turn) or
+<|endoftext|> (dropped). If the prompt ends with the <think> prefill, the returned text
+starts with it again (format.from_completion), so callers always parse a full turn;
+n_tokens counts only generated tokens. temperature == 0 means greedy.
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from typing import Protocol, Sequence
 
 import torch
 
-from crllm.format import EOT, IM_END
+from crllm.format import EOT, IM_END, from_completion
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +57,8 @@ class HFGenerator:
         self.eot = self.tok.convert_tokens_to_ids(EOT)
 
     @torch.no_grad()
-    def generate(self, prompts, *, max_new_tokens, temperature=0.0, top_p=1.0, n=1, seed=0):
+    def generate(self, prompts, *, max_new_tokens, temperature=0.0, top_p=1.0, n=1, seed=0, on_batch=None):
+        """`on_batch(indices, completions)` is called after each batch (used to checkpoint eval runs)."""
         self.model.eval()
         enc = [self.tok(p, add_special_tokens=False)["input_ids"] for p in prompts]
         order = sorted(range(len(prompts)), key=lambda i: -len(enc[i]))
@@ -89,8 +92,11 @@ class HFGenerator:
                 y = self.model.generate(input_ids=ids.to(dev), attention_mask=att.to(dev), **gen_kwargs)
                 for row, i in enumerate(idx):
                     new, finish = _cut(y[row, width:].tolist(), {self.im_end}, {self.eot})
-                    out[i].append(Completion(self.tok.decode(new, skip_special_tokens=False), len(new), finish))
+                    text = from_completion(prompts[i], self.tok.decode(new, skip_special_tokens=False))
+                    out[i].append(Completion(text, len(new), finish))
             done += len(idx)
+            if on_batch is not None:
+                on_batch(idx, [out[i] for i in idx])
             if torch.cuda.is_available():
                 # Dynamic KV caches grow by concatenation; without this the freed blocks fragment
                 # until the allocator sits at the memory cap and slows down (2.5 -> 3.2 s/prompt).
@@ -124,14 +130,15 @@ class VLLMGenerator:
         )
         res = self.llm.generate(list(prompts), sp)
         out = []
-        for r in res:
+        for prompt, r in zip(prompts, res):
             row = []
             for o in r.outputs:
                 ids = list(o.token_ids)
                 text = o.text
                 if o.finish_reason == "stop" and ids and ids[-1] == self.im_end and not text.endswith(IM_END):
                     text += IM_END
-                row.append(Completion(text, len(ids), "stop" if o.finish_reason == "stop" else "length"))
+                row.append(Completion(from_completion(prompt, text), len(ids),
+                                      "stop" if o.finish_reason == "stop" else "length"))
             out.append(row)
         return out
 

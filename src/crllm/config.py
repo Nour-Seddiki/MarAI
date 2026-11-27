@@ -66,7 +66,18 @@ class TrainCfg:
 
 
 @dataclass
+class Stage1MixCfg:
+    """Shares of each Stage 1 source (normalized); see crllm/data/build_sft.py."""
+    mot_math: float = 0.35   # real R1 math traces that fit
+    mot_code: float = 0.10   # real R1 code traces that fit (few at 2,048, none at 1,024)
+    omi_math: float = 0.25   # OpenMathInstruct-2 short solutions
+    oci_code: float = 0.30   # OpenCodeInstruct verified code + teacher-written plan
+
+
+@dataclass
 class DataCfg:
+    stage1_mix: Stage1MixCfg = field(default_factory=Stage1MixCfg)
+    teacher_max_tokens: int = 256
     stage1_examples: int = 200
     stage2_prompts: int = 100
     stage3_prompts: int = 100
@@ -113,7 +124,8 @@ class JudgeCfg:
 
 @dataclass
 class EvalCfg:
-    suites: list[str] = field(default_factory=lambda: ["format", "gsm8k", "redteam", "overrefusal", "honesty"])
+    suites: list[str] = field(default_factory=lambda: [
+        "format", "gsm8k", "math500", "mbpp", "redteam", "overrefusal", "honesty"])
     max_new_tokens: int = 768
     gsm8k_n: int = 1319
     batch_size: int = 16   # part of the eval protocol: greedy bf16 outputs change with batch size

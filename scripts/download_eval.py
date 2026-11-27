@@ -1,11 +1,13 @@
 """One-off: download the eval sources and write data/eval/<suite>.jsonl.
 
 Suites (fixed seed, so every machine builds the same files):
-  format       200 mixed prompts: 120 Alpaca-cleaned instructions (no input) + 80 GSM8K test questions
+  format       400 mixed prompts: 200 Alpaca-cleaned (no input) + 100 GSM8K test + 50 MATH-500 + 50 MBPP
   gsm8k        GSM8K test (all 1,319; run_eval takes the first eval.gsm8k_n)
-  redteam      200 Do-Not-Answer questions (LibrAI/do-not-answer), stratified by risk area
+  math500      MATH-500 (HuggingFaceH4/MATH-500), LaTeX exact match after normalization
+  mbpp         MBPP sanitized test (257), pass@1 by running the listed asserts
+  redteam      500 Do-Not-Answer questions (LibrAI/do-not-answer), stratified by risk area
   overrefusal  the 250 XSTest prompts labelled safe
-  honesty      100 SelfAware questions marked unanswerable
+  honesty      300 SelfAware questions marked unanswerable
 
 Record fields: id, suite, question (raw user text), prompt (format.build_prompt), key
 (format.prompt_key, used by build_*.py to keep eval prompts out of training), answer
@@ -39,6 +41,8 @@ SOURCES = {
     "xstest": ("walledai/XSTest", "default", "test"),
     "xstest_alt": ("Paul/XSTest", "default", "train"),
     "selfaware": ("OkayestProgrammer/selfAware", "default", "train"),
+    "math500": ("HuggingFaceH4/MATH-500", "default", "test"),
+    "mbpp": ("google-research-datasets/mbpp", "sanitized", "test"),
 }
 API = "https://huggingface.co/api/datasets/{repo}/parquet/{config}/{split}/0.parquet"
 
@@ -88,15 +92,45 @@ def build_gsm8k(df: pd.DataFrame) -> list[dict]:
     return out
 
 
-def build_format(alpaca: pd.DataFrame, gsm: pd.DataFrame, rng: random.Random) -> list[dict]:
+def mbpp_question(prompt: str, tests: list[str]) -> str:
+    """The standard MBPP prompt: the task plus its asserts, so the function name is defined."""
+    return (f"{prompt.strip()}\nYour code should pass these tests:\n```python\n" + "\n".join(tests)
+            + "\n```\nWrite the solution in a ```python code block.")
+
+
+def build_format(alpaca: pd.DataFrame, gsm: pd.DataFrame, math: pd.DataFrame, mbpp: pd.DataFrame,
+                 rng: random.Random) -> list[dict]:
     pool = alpaca[(alpaca["input"].str.strip() == "") & (alpaca["instruction"].str.len().between(15, 400))]
-    picks = [("alpaca", q) for q in pool.sample(120, random_state=rng.randrange(2**31))["instruction"]]
-    picks += [("gsm8k", q) for q in gsm.sample(80, random_state=rng.randrange(2**31))["question"]]
+    picks = [("alpaca", q) for q in pool.sample(200, random_state=rng.randrange(2**31))["instruction"]]
+    picks += [("gsm8k", q) for q in gsm.sample(100, random_state=rng.randrange(2**31))["question"]]
+    picks += [("math500", q) for q in math.sample(50, random_state=rng.randrange(2**31))["problem"]]
+    picks += [("mbpp", mbpp_question(r.prompt, list(r.test_list)))
+              for r in mbpp.sample(50, random_state=rng.randrange(2**31)).itertuples()]
     rng.shuffle(picks)
     return [record("format", i, q, source=src) for i, (src, q) in enumerate(picks)]
 
 
-def build_redteam(dna: pd.DataFrame, rng: random.Random, n: int = 200) -> list[dict]:
+def build_math500(df: pd.DataFrame) -> list[dict]:
+    return [record("math500", i, r.problem, r.answer, subject=r.subject, level=int(r.level), uid=r.unique_id)
+            for i, r in enumerate(df.itertuples())]
+
+
+def build_mbpp(df: pd.DataFrame) -> list[dict]:
+    out = []
+    for i, r in enumerate(df.itertuples()):
+        tests = [str(t) for t in r.test_list]
+        out.append(record("mbpp", i, mbpp_question(r.prompt, tests), None, task_id=int(r.task_id),
+                          tests=tests, test_imports=[str(t) for t in r.test_imports]))
+    return out
+
+
+def dedupe(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Drop rows whose `col` text repeats (case/whitespace-insensitive); keeps the first."""
+    return df[~df[col].map(prompt_key).duplicated()]
+
+
+def build_redteam(dna: pd.DataFrame, rng: random.Random, n: int = 500) -> list[dict]:
+    dna = dedupe(dna, "question")  # Do-Not-Answer repeats some templated questions
     # stratify by risk area so no single harm type dominates the score
     groups = {k: g for k, g in dna.groupby("risk_area")}
     per = {k: max(1, round(n * len(g) / len(dna))) for k, g in groups.items()}
@@ -123,8 +157,8 @@ def build_overrefusal(xs: pd.DataFrame) -> list[dict]:
             for i, (_, r) in enumerate(safe.iterrows())]
 
 
-def build_honesty(sa: pd.DataFrame, rng: random.Random, n: int = 100) -> list[dict]:
-    un = sa[~sa["answerable"].astype(bool)]
+def build_honesty(sa: pd.DataFrame, rng: random.Random, n: int = 300) -> list[dict]:
+    un = dedupe(sa[~sa["answerable"].astype(bool)], "question")
     rows = un.sample(n, random_state=rng.randrange(2**31))
     return [record("honesty", i, r.question, source=r.source, source_id=int(r.question_id))
             for i, r in enumerate(rows.itertuples())]
@@ -149,10 +183,14 @@ def main() -> None:
         print(f"  xstest primary failed ({type(e).__name__}); trying {SOURCES['xstest_alt'][0]}")
         xs = fetch_parquet("xstest_alt", raw)
     sa = fetch_parquet("selfaware", raw)
+    math = fetch_parquet("math500", raw)
+    mbpp = fetch_parquet("mbpp", raw)
 
     suites = {
-        "format": build_format(alpaca, gsm, rng),
+        "format": build_format(alpaca, gsm, math, mbpp, rng),
         "gsm8k": build_gsm8k(gsm),
+        "math500": build_math500(math),
+        "mbpp": build_mbpp(mbpp),
         "redteam": build_redteam(dna, rng),
         "overrefusal": build_overrefusal(xs),
         "honesty": build_honesty(sa, rng),

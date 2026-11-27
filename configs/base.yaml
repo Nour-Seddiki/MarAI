@@ -38,6 +38,9 @@ train:
   save_steps: 100
 
 data:
+  # Stage 1 source shares (crllm/data/build_sft.py); a source that runs short is topped up
+  stage1_mix: {mot_math: 0.35, mot_code: 0.10, omi_math: 0.25, oci_code: 0.30}
+  teacher_max_tokens: 256     # code plans written by the judge endpoint
   stage1_examples: 200
   stage2_prompts: 100
   stage3_prompts: 100
@@ -76,7 +79,7 @@ judge:
   retries: 3
 
 eval:
-  suites: [format, gsm8k, redteam, overrefusal, honesty]
+  suites: [format, gsm8k, math500, mbpp, redteam, overrefusal, honesty]
   max_new_tokens: 768
   gsm8k_n: 1319               # full test set: a 500-item subset has ~2.2 pt standard error
   # Fixed for every stage: greedy bf16 outputs depend on batch composition (only 13/32

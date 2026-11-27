@@ -143,6 +143,50 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual((o["unjudged"], o["flags_uncertainty"]["n"]), (2, 0))
 
 
+class MathCodeSuitesTest(unittest.TestCase):
+    def test_math500(self):
+        from crllm.eval.suites import score_math500
+
+        rows = [{"answer": "\\frac{14}{3}", "meta": {"level": 3}}, {"answer": "(3,\\frac{\\pi}{2})", "meta": {"level": 2}}]
+        comps = [C(wrap("work", "So it is \\boxed{\\dfrac{14}{3}}.")), C(wrap("work", "\\boxed{(3, \\pi)}"))]
+        s = score_math500(rows, comps)
+        self.assertEqual(s.metrics["accuracy"]["k"], 1)
+        self.assertEqual(s.metrics["by_level"], {2: 0.0, 3: 1.0})
+
+    def test_strict_vs_lenient(self):
+        from crllm.eval.suites import score_math500, score_mbpp
+
+        # solved inside an unclosed <think>: wrong for the user (strict), right for reasoning (lenient)
+        g = score_gsm8k([{"answer": "18"}], [C("<think>16-3-4=9, 9*2=18", finish="length")])
+        self.assertEqual((g.metrics["accuracy"]["k"], g.metrics["accuracy_lenient"]["k"]), (0, 1))
+        m = score_math500([{"answer": "5", "meta": {"level": 1}}], [C("<think>so \\boxed{5}<|im_end|>")])
+        self.assertEqual((m.metrics["accuracy"]["k"], m.metrics["accuracy_lenient"]["k"]), (0, 1))
+        rows = [{"meta": {"tests": ["assert sq(3) == 9"], "test_imports": []}}]
+        b = score_mbpp(rows, [C("<think>plan\n```python\ndef sq(x):\n    return x * x\n```<|im_end|>")])
+        self.assertEqual((b.metrics["pass_at_1"]["k"], b.metrics["pass_at_1_lenient"]["k"]), (0, 1))
+
+    def test_execute(self):
+        from crllm.eval.execute import run_tests
+
+        tests = ["assert add(2, 3) == 5"]
+        self.assertEqual(run_tests("def add(a, b):\n    return a + b", tests).status, "passed")
+        r = run_tests("def add(a, b):\n    return a - b", tests)
+        self.assertEqual(r.status, "failed")
+        self.assertIn("AssertionError", r.detail)
+        self.assertEqual(run_tests(None, tests).status, "no_code")
+        self.assertEqual(run_tests("while True:\n    pass", tests, timeout_s=1).status, "timeout")
+        self.assertEqual(run_tests("x = math.sqrt(4)", ["assert x == 2"], imports=["import math"]).status, "passed")
+
+    def test_mbpp(self):
+        from crllm.eval.suites import score_mbpp
+
+        rows = [{"meta": {"tests": ["assert sq(3) == 9"], "test_imports": []}}] * 2
+        comps = [C(wrap("square it", "```python\ndef sq(x):\n    return x * x\n```")), C("no code")]
+        s = score_mbpp(rows, comps)
+        self.assertEqual(s.metrics["pass_at_1"]["k"], 1)
+        self.assertEqual(s.metrics["status"], {"passed": 1, "no_code": 1})
+
+
 class GenerateTest(unittest.TestCase):
     def test_cut(self):
         self.assertEqual(_cut([5, 6, 1, 7], {1}, {2}), ([5, 6, 1], "stop"))
@@ -157,6 +201,48 @@ class ResolveCkptTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             resolve_ckpt(cfg, "stage1" if not (cfg.path("ckpt_dir") / "stage1-merged").exists() else "nope/x")
         self.assertEqual(resolve_ckpt(cfg, str(ROOT / "configs"))[0], "configs")
+
+
+@unittest.skipUnless((ROOT / "data" / "eval" / "format.jsonl").exists(), "eval data not built")
+class ResumeTest(unittest.TestCase):
+    def test_stopped_run_resumes_without_regenerating(self):
+        import json
+        import tempfile
+        from unittest import mock
+
+        from crllm.eval import run_eval
+
+        asked = []
+
+        class FakeGen:
+            def __init__(self, stop_after_first):
+                self.stop = stop_after_first
+
+            def generate(self, prompts, *, max_new_tokens, temperature=0.0, on_batch=None, **kw):
+                asked.append(len(prompts))
+                outs = [[C(wrap("r", "x"))] for _ in prompts]
+                for b in range(0, len(prompts), 2):
+                    on_batch(list(range(b, min(b + 2, len(prompts)))), outs[b:b + 2])
+                    if self.stop:
+                        raise KeyboardInterrupt  # simulate the user stopping the run
+                return outs
+
+        with tempfile.TemporaryDirectory() as d:
+            argv = ["--config", "debug", "--suites", "format", "--limit", "5", "--skip-judge",
+                    "--name", "resume", "--set", f"paths.reports_dir={d}", "--set", "runtime.keep_awake=false",
+                    "--set", "runtime.pin_p_cores=false", "--set", "runtime.cuda_memory_fraction=null"]
+            with mock.patch("crllm.generate.make_generator", return_value=FakeGen(True)):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_eval.main(argv)
+            partial = Path(d) / "debug" / "resume.partial.jsonl"
+            self.assertEqual(len(partial.read_text(encoding="utf-8").splitlines()), 3)  # header + 2
+            with mock.patch("crllm.generate.make_generator", return_value=FakeGen(False)):
+                report = run_eval.main(argv)
+            self.assertEqual(asked, [5, 3])                   # second run only generated the missing 3
+            self.assertEqual(report["suites"]["format"]["well_formed"]["n"], 5)
+            self.assertFalse(partial.exists())
+            rows = [json.loads(x) for x in (Path(d) / "debug" / "resume.samples.jsonl").open(encoding="utf-8")]
+            self.assertEqual(len(rows), 5)
 
 
 def _load_download_eval():
@@ -174,7 +260,7 @@ class SuiteBuilderTest(unittest.TestCase):
     def test_gsm8k_gold(self):
         rows = self.de.build_gsm8k(pd.DataFrame({"question": ["q"], "answer": ["2+2=4\n#### 1,004"]}))
         self.assertEqual(rows[0]["answer"], "1004")
-        self.assertTrue(rows[0]["prompt"].endswith("<|im_start|>assistant\n"))
+        self.assertTrue(rows[0]["prompt"].endswith("<|im_start|>assistant\n<think>"))
 
     def test_redteam_stratified_exact_size(self):
         import random

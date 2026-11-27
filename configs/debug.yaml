@@ -14,7 +14,7 @@ train:
   gradient_checkpointing: true
 
 data:
-  stage1_examples: 200
+  stage1_examples: 2000       # ~1.5 h for 2 epochs at 1,024 tokens on the laptop
   stage2_prompts: 100
   stage3_prompts: 100
 
@@ -31,12 +31,15 @@ grpo:
 
 judge:
   base_url: http://127.0.0.1:11434/v1
-  model: qwen3.5:4b           # the model installed in Ollama on the laptop
+  # scripts/compare_judges.py on 40 baseline replies: 9B catches privacy leaks and confident
+  # misinformation the 4B scored 3; qwen2.5-coder:7b gave 12/16 red-team replies a 5 (unusable).
+  model: qwen3.5:9b           # ~1 s/verdict on the RTX 5050 (partly CPU-offloaded)
   reasoning_effort: none      # without it Qwen3.5 thinks for 600+ tokens per call
   concurrency: 1              # Ollama runs one request at a time (OLLAMA_NUM_PARALLEL=1)
 
 eval:
-  gsm8k_n: 200                # debug only checks the harness runs, not the gate
+  gsm8k_n: 500                # +-2.2 pts standard error at ~50% accuracy
+  max_new_tokens: 1024        # = train.max_seq_len: 768 cut R1-style reasoning off before </think>
 
 runtime:
   keep_awake: true
