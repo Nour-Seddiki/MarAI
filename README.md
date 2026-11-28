@@ -20,7 +20,7 @@ Each stage ends with a LoRA merge into a bf16 checkpoint and an eval run. The ne
 | M1 Format module | done | `format.py` + tests, format-token check and fix (below) |
 | M2 Eval harness + baseline | done | 7 suites, local 9B judge, resumable runs (below) |
 | M3 Stage 1 (debug) | done | math + code `<think>` SFT, `<think>` prefill (below) |
-| M6 Stage 4 (debug) | trained | GRPO on correctness + format, straight from Stage 1; full eval pending |
+| M6 Stage 4 (debug) | done | GRPO on correctness + format, straight from Stage 1: format 50% → 70%, MBPP ×2 (below) |
 | M4–M5 Judge + Stages 2–3 (debug) | — | constitutional SFT and reward model |
 | M7 Full run on rented GPU | — | |
 | M8 Report, GGUF export | — | |
@@ -137,31 +137,48 @@ MBPP runs model-written code with `python -I` in an empty temp directory, with a
 
 The build scripts drop any training prompt whose `key` (normalized-text hash) appears in `data/eval/`.
 
-### Results: debug config (Qwen3-0.6B-Base, 2026-11-26)
+### Results: debug config (Qwen3-0.6B-Base)
 
-Both models are scored with the same protocol: bf16, greedy, `<think>` prefill, 1,024 new tokens, batch 16, judge `qwen3.5:9b`. Errors are ± one standard error. `python scripts/summarize_report.py reports/debug/base.json reports/debug/stage1.json` prints this table.
+All three models are scored with the same protocol: bf16, greedy, `<think>` prefill, 1,024 new tokens, batch 16, judge `qwen3.5:9b`. Errors are ± one standard error. `python scripts/summarize_report.py reports/debug/base.json reports/debug/stage1.json reports/debug/final.json` prints this table. "Stage 4" is `ckpt/final`: GRPO run straight on top of Stage 1.
 
-| Suite | Base, strict | Base, lenient | Stage 1, strict | Stage 1, lenient | Note |
-|---|---|---|---|---|---|
-| format (well-formed) | 0.0% | | **49.7% ± 2.5** | | gate ≥ 95%: **not met** |
-| GSM8K (500) | 0.0% | 21.2% ± 1.8 | **57.2% ± 2.2** | 58.8% ± 2.2 | |
-| MATH-500 | 0.0% | 22.2% ± 1.9 | **35.0% ± 2.1** | 36.2% ± 2.1 | level 1: 81% … level 5: 9% |
-| MBPP pass@1 | 0.0% | 0.8% ± 0.5 | **11.7% ± 2.0** | 32.7% ± 2.9 | most working code sits inside an unclosed `<think>` |
-| red-team safety (1–5) | 3.51 ± 0.05 | | 3.46 ± 0.06 | | Stage 1 doesn't train safety; Stage 2 does |
-| over-refusal (lower is better) | 24.4% | | **0.8%** | | |
-| honesty (flags uncertainty) | 3.7% | | 8.3% | | |
+| Suite | Base | Stage 1 | **Stage 4** | Stage 1 → 4 |
+|---|---|---|---|---|
+| format (well-formed) | 0.0% | 49.7% ± 2.5 | **70.3% ± 2.3** | **+20.6** (gate ≥ 95%: not met yet) |
+| GSM8K (500), strict | 0.0% | 57.2% ± 2.2 | **63.4% ± 2.2** | **+6.2** |
+| GSM8K, lenient | 21.2% | 58.8% | 63.8% | +5.0 |
+| MATH-500, strict | 0.0% | 35.0% ± 2.1 | 32.8% ± 2.1 | −2.2 (within noise) |
+| MATH-500, lenient | 22.2% | 36.2% | 35.0% | −1.2 |
+| MBPP pass@1, strict | 0.0% | 11.7% ± 2.0 | **21.8% ± 2.6** | **+10.1** |
+| MBPP pass@1, lenient | 0.8% | 32.7% | **48.6%** | **+15.9** |
+| red-team safety (1–5) | 3.51 ± 0.05 | 3.46 ± 0.06 | 3.55 ± 0.06 | +0.09 (noise) |
+| red-team harmful rate (score ≤ 2) | 12.6% ± 1.5 | 19.4% ± 1.8 | 20.2% ± 1.8 | +0.8 (noise) |
+| over-refusal (lower is better) | 24.4% | 0.8% | 0.8% | 0 |
+| honesty (flags uncertainty) | 3.7% | 8.3% ± 1.6 | **14.0% ± 2.0** | **+5.7** |
+
+Replies hitting the 1,024-token limit (Stage 1 → Stage 4): format 39% → 12%, GSM8K 18% → 2%, MBPP 40% → 2%, red-team 52% → 28%.
+
+**What Stage 4 changed** (100 GRPO steps, 400 prompts, ~1.5 h on the laptop):
+
+- **Format is the big win.** Well-formed replies rose from 50% to 70% overall: GSM8K prompts 97%, chat prompts 36% → 66%, MBPP 18% → 30%. Runaway thinking nearly disappeared on math and code, and replies are about 40% shorter.
+- **Code accuracy almost doubled** (strict MBPP 11.7% → 21.8%). The model also writes working code more often (lenient 32.7% → 48.6%). Code is still where the format fails most: 134 of 257 MBPP replies end the turn without `</think>` and with no code after it.
+- **GSM8K up 6 points**, which is real (about 2 standard errors). **MATH-500 didn't improve** and may have slipped slightly, within noise. GRPO trained with a 512-token completion budget, which rewards short answers, and the hard MATH problems need long reasoning.
+- **Safety is unchanged by Stage 4, but worse than base.** The harmful rate went up in **Stage 1** (12.6% → 19.4%), once the model learned to answer instead of rambling; Stage 4 kept it there (20.2%). Nothing so far rewards declining a harmful request. That's what the constitutional stages (2–3) are for, and the model **shouldn't be used** until then.
 
 **Strict** scores read the answer after `</think>`, which is what a user sees. **Lenient** scores accept an answer found anywhere in the reply, so reasoning ability and format are measured separately. With the prefill, the base model never closes `</think>`, so it gets 0 on strict, and the unfamiliar `<think>` token also lowers its lenient score: without the prefill it got 41.5% on GSM8K. Even on the lenient measure, Stage 1 gains **+38 points on GSM8K, +14 on MATH-500 and +32 on MBPP**, so the training improved the reasoning and not just the format. On code the format costs the most: the model writes passing code 32.7% of the time, but only 11.7% after `</think>`.
 
 The judge varies a little between runs. Re-judging the same Stage 1 completions moved red-team from 3.40 to 3.46, about one standard error.
 
-Where Stage 1 falls short of the format gate:
+Where Stage 1 fell short of the format gate, before Stage 4:
 
 - **General chat never stops thinking.** Only 36% of the Alpaca format prompts are well-formed, and 45–52% of red-team, over-refusal and honesty replies run to the 1,024-token limit. Stage 1 had no general chat data, so on "explain Agile" or a harmful request the model reasons in R1 style and never gets to an answer.
 - **Code skips `</think>`.** Only 18–25% of MBPP replies are well-formed: the model writes reasoning and code inside the thinking block and ends the turn, or writes `</think>` more than once.
 - **Math works:** 76–85% well-formed on GSM8K and MATH-500 prompts.
 
-Next fix for the data: add a general chat source with short teacher-written thinking, prefer shorter R1 traces, and give code more weight.
+Next steps:
+
+- **Stages 2–3 (constitution):** constitutional SFT and a reward model, so a constitutional reward can join correctness and format in GRPO. This is needed before the model is safe to use.
+- **Stage 1 data:** add a general chat source with short teacher-written thinking, prefer shorter R1 traces, and give code more weight.
+- **Scale:** the full config on a rented GPU (Qwen3-1.7B, 20k examples, 2,048 tokens).
 
 ## Install
 
